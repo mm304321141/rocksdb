@@ -2736,6 +2736,7 @@ class Benchmark {
         break;
       case kThreadedRBTree:
         options.memtable_factory.reset(NewThreadedRBTreeRepFactory());
+        break;
 #else
       default:
         fprintf(stderr, "Only skip list is supported in lite mode\n");

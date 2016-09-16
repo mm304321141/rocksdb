@@ -449,7 +449,6 @@ void threaded_rb_tree_find_path_for_multi(root_t &root,
 )
 {
     typedef typename root_t::node_type node_type;
-    typedef typename root_t::index_type index_type;
 
     std::size_t p = root.root.root;
     while(p != node_type::nil_sentinel)
@@ -486,7 +485,6 @@ bool threaded_rb_tree_find_path_for_unique(root_t &root,
 )
 {
     typedef typename root_t::node_type node_type;
-    typedef typename root_t::index_type index_type;
 
     std::size_t p = root.root.root;
     while(p != node_type::nil_sentinel)
@@ -526,7 +524,6 @@ bool threaded_rb_tree_find_path_for_remove(root_t &root,
 )
 {
     typedef typename root_t::node_type node_type;
-    typedef typename root_t::index_type index_type;
 
     std::size_t p = root.root.root;
     while(p != node_type::nil_sentinel)
@@ -567,7 +564,6 @@ std::size_t threaded_rb_tree_lower_bound(root_t &root,
 )
 {
     typedef typename root_t::node_type node_type;
-    typedef typename root_t::index_type index_type;
 
     std::size_t p = root.root.root, w = node_type::nil_sentinel;
     while(p != node_type::nil_sentinel)
@@ -602,7 +598,6 @@ std::size_t threaded_rb_tree_reverse_lower_bound(root_t &root,
 )
 {
     typedef typename root_t::node_type node_type;
-    typedef typename root_t::index_type index_type;
 
     std::size_t p = root.root.root, w = node_type::nil_sentinel;
     while(p != node_type::nil_sentinel)
@@ -638,7 +633,6 @@ std::size_t threaded_rb_tree_upper_bound(root_t &root,
 )
 {
     typedef typename root_t::node_type node_type;
-    typedef typename root_t::index_type index_type;
 
     std::size_t p = root.root.root, w = node_type::nil_sentinel;
     while(p != node_type::nil_sentinel)
@@ -673,7 +667,6 @@ std::size_t threaded_rb_tree_reverse_upper_bound(root_t &root,
 )
 {
     typedef typename root_t::node_type node_type;
-    typedef typename root_t::index_type index_type;
 
     std::size_t p = root.root.root, w = node_type::nil_sentinel;
     while(p != node_type::nil_sentinel)
@@ -711,7 +704,6 @@ void threaded_rb_tree_equal_range(root_t &root,
 )
 {
     typedef typename root_t::node_type node_type;
-    typedef typename root_t::index_type index_type;
 
     std::size_t p = root.root.root;
     lower = node_type::nil_sentinel;
@@ -2390,6 +2382,7 @@ protected:
                                                             index,
                                                             key_compare_ex{&root_}
         );
+        (void)exists;
         assert(exists);
         threaded_rb_tree_remove(root_, stack, deref_node_t{&root_.container});
         auto &value = config_t::get_value(root_.container, index);
