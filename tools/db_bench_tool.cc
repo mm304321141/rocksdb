@@ -838,7 +838,8 @@ enum RepFactory {
   kPrefixHash,
   kVectorRep,
   kHashLinkedList,
-  kCuckoo
+  kCuckoo,
+  kThreadedRBTree,
 };
 
 enum RepFactory StringToRepFactory(const char* ctype) {
@@ -854,6 +855,8 @@ enum RepFactory StringToRepFactory(const char* ctype) {
     return kHashLinkedList;
   else if (!strcasecmp(ctype, "cuckoo"))
     return kCuckoo;
+  else if (!strcasecmp(ctype, "trbtree"))
+    return kThreadedRBTree;
 
   fprintf(stdout, "Cannot parse memreptable %s\n", ctype);
   return kSkipList;
@@ -1831,6 +1834,9 @@ class Benchmark {
       case kCuckoo:
         fprintf(stdout, "Memtablerep: cuckoo\n");
         break;
+      case kThreadedRBTree:
+        fprintf(stdout, "Memtablerep: threaded_rbtree\n");
+        break;
     }
     fprintf(stdout, "Perf Level: %d\n", FLAGS_perf_level);
 
@@ -2728,6 +2734,8 @@ class Benchmark {
         options.memtable_factory.reset(NewHashCuckooRepFactory(
             options.write_buffer_size, FLAGS_key_size + FLAGS_value_size));
         break;
+      case kThreadedRBTree:
+        options.memtable_factory.reset(NewThreadedRBTreeRepFactory());
 #else
       default:
         fprintf(stderr, "Only skip list is supported in lite mode\n");

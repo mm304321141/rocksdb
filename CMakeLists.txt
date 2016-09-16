@@ -152,6 +152,7 @@ set(SOURCES
         memtable/hash_skiplist_rep.cc
         memtable/skiplistrep.cc
         memtable/vectorrep.cc
+        emtable/vectorrep.cc
         port/stack_trace.cc
         port/win/io_win.cc
         port/win/env_win.cc
