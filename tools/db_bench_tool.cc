@@ -2735,7 +2735,7 @@ class Benchmark {
             options.write_buffer_size, FLAGS_key_size + FLAGS_value_size));
         break;
       case kThreadedRBTree:
-        options.memtable_factory.reset(NewThreadedRBTreeRepFactory());
+        options.memtable_factory.reset(NewThreadedRBTreeRepFactory(600000));
         break;
 #else
       default:
