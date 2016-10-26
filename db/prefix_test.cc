@@ -18,6 +18,7 @@ int main() {
 #include <vector>
 
 #include <gflags/gflags.h>
+#include "db/db_impl.h"
 #include "rocksdb/comparator.h"
 #include "rocksdb/db.h"
 #include "rocksdb/filter_policy.h"
@@ -291,6 +292,7 @@ TEST(SamePrefixTest, InDomainTest) {
   WriteOptions write_options;
   ReadOptions read_options;
   {
+    ASSERT_OK(DestroyDB(kDbName, Options()));
     ASSERT_OK(DB::Open(options, kDbName, &db));
     ASSERT_OK(db->Put(write_options, "HHKB pro2", "Mar 24, 2006"));
     ASSERT_OK(db->Put(write_options, "HHKB pro2 Type-S", "June 29, 2011"));
@@ -728,6 +730,7 @@ TEST_F(PrefixTest, PrefixSeekModePrev) {
                   << iter->value().ToString() << " " << it->second << std::endl;
       }
       ASSERT_EQ(iter->value(), it->second);
+      uint64_t stored_prefix = prefix;
       for (size_t k = 0; k < 9; k++) {
         if (rnd.OneIn(2) || it == whole_map.begin()) {
           iter->Next();
@@ -742,9 +745,11 @@ TEST_F(PrefixTest, PrefixSeekModePrev) {
             std::cout << "Prev >> ";
           }
         }
-        if (!iter->Valid() || SliceToTestKey(iter->key())->prefix != prefix) {
+        if (!iter->Valid() ||
+            SliceToTestKey(iter->key())->prefix != stored_prefix) {
           break;
         }
+        stored_prefix = SliceToTestKey(iter->key())->prefix;
         ASSERT_TRUE(iter->Valid());
         ASSERT_NE(it, whole_map.end());
         ASSERT_EQ(iter->value(), it->second);
@@ -757,6 +762,94 @@ TEST_F(PrefixTest, PrefixSeekModePrev) {
         }
       }
     }
+  }
+}
+
+TEST_F(PrefixTest, PrefixSeekModePrev2) {
+  // Only for SkipListFactory
+  // test the case
+  //        iter1                iter2
+  // | prefix | suffix |  | prefix | suffix |
+  // |   1    |   1    |  |   1    |   2    |
+  // |   1    |   3    |  |   1    |   4    |
+  // |   2    |   1    |  |   3    |   3    |
+  // |   2    |   2    |  |   3    |   4    |
+  // after seek(15), iter1 will be at 21 and iter2 will be 33.
+  // Then if call Prev() in prefix mode where SeekForPrev(21) gets called,
+  // iter2 should turn to invalid state because of bloom filter.
+  options.memtable_factory.reset(new SkipListFactory);
+  options.write_buffer_size = 1024 * 1024;
+  std::string v13("v13");
+  DestroyDB(kDbName, Options());
+  auto db = OpenDb();
+  WriteOptions write_options;
+  ReadOptions read_options;
+  PutKey(db.get(), write_options, TestKey(1, 2), "v12");
+  PutKey(db.get(), write_options, TestKey(1, 4), "v14");
+  PutKey(db.get(), write_options, TestKey(3, 3), "v33");
+  PutKey(db.get(), write_options, TestKey(3, 4), "v34");
+  db->Flush(FlushOptions());
+  reinterpret_cast<DBImpl*>(db.get())->TEST_WaitForFlushMemTable();
+  PutKey(db.get(), write_options, TestKey(1, 1), "v11");
+  PutKey(db.get(), write_options, TestKey(1, 3), "v13");
+  PutKey(db.get(), write_options, TestKey(2, 1), "v21");
+  PutKey(db.get(), write_options, TestKey(2, 2), "v22");
+  db->Flush(FlushOptions());
+  reinterpret_cast<DBImpl*>(db.get())->TEST_WaitForFlushMemTable();
+  std::unique_ptr<Iterator> iter(db->NewIterator(read_options));
+  SeekIterator(iter.get(), 1, 5);
+  iter->Prev();
+  ASSERT_EQ(iter->value(), v13);
+}
+
+TEST_F(PrefixTest, PrefixSeekModePrev3) {
+  // Only for SkipListFactory
+  // test SeekToLast() with iterate_upper_bound_ in prefix_seek_mode
+  options.memtable_factory.reset(new SkipListFactory);
+  options.write_buffer_size = 1024 * 1024;
+  std::string v14("v14");
+  TestKey upper_bound_key = TestKey(1, 5);
+  Slice upper_bound = TestKeyToSlice(upper_bound_key);
+
+  {
+    DestroyDB(kDbName, Options());
+    auto db = OpenDb();
+    WriteOptions write_options;
+    ReadOptions read_options;
+    read_options.iterate_upper_bound = &upper_bound;
+    PutKey(db.get(), write_options, TestKey(1, 2), "v12");
+    PutKey(db.get(), write_options, TestKey(1, 4), "v14");
+    db->Flush(FlushOptions());
+    reinterpret_cast<DBImpl*>(db.get())->TEST_WaitForFlushMemTable();
+    PutKey(db.get(), write_options, TestKey(1, 1), "v11");
+    PutKey(db.get(), write_options, TestKey(1, 3), "v13");
+    PutKey(db.get(), write_options, TestKey(2, 1), "v21");
+    PutKey(db.get(), write_options, TestKey(2, 2), "v22");
+    db->Flush(FlushOptions());
+    reinterpret_cast<DBImpl*>(db.get())->TEST_WaitForFlushMemTable();
+    std::unique_ptr<Iterator> iter(db->NewIterator(read_options));
+    iter->SeekToLast();
+    ASSERT_EQ(iter->value(), v14);
+  }
+  {
+    DestroyDB(kDbName, Options());
+    auto db = OpenDb();
+    WriteOptions write_options;
+    ReadOptions read_options;
+    read_options.iterate_upper_bound = &upper_bound;
+    PutKey(db.get(), write_options, TestKey(1, 2), "v12");
+    PutKey(db.get(), write_options, TestKey(1, 4), "v14");
+    PutKey(db.get(), write_options, TestKey(3, 3), "v33");
+    PutKey(db.get(), write_options, TestKey(3, 4), "v34");
+    db->Flush(FlushOptions());
+    reinterpret_cast<DBImpl*>(db.get())->TEST_WaitForFlushMemTable();
+    PutKey(db.get(), write_options, TestKey(1, 1), "v11");
+    PutKey(db.get(), write_options, TestKey(1, 3), "v13");
+    db->Flush(FlushOptions());
+    reinterpret_cast<DBImpl*>(db.get())->TEST_WaitForFlushMemTable();
+    std::unique_ptr<Iterator> iter(db->NewIterator(read_options));
+    iter->SeekToLast();
+    ASSERT_EQ(iter->value(), v14);
   }
 }
 

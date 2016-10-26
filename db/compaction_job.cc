@@ -262,7 +262,7 @@ void CompactionJob::AggregateStatistics() {
 }
 
 CompactionJob::CompactionJob(
-    int job_id, Compaction* compaction, const DBOptions& db_options,
+    int job_id, Compaction* compaction, const ImmutableDBOptions& db_options,
     const EnvOptions& env_options, VersionSet* versions,
     std::atomic<bool>* shutting_down, LogBuffer* log_buffer,
     Directory* db_directory, Directory* output_directory, Statistics* stats,
@@ -297,7 +297,7 @@ CompactionJob::CompactionJob(
   assert(log_buffer_ != nullptr);
   const auto* cfd = compact_->compaction->column_family_data();
   ThreadStatusUtil::SetColumnFamily(cfd, cfd->ioptions()->env,
-                                    cfd->options()->enable_thread_tracking);
+                                    db_options_.enable_thread_tracking);
   ThreadStatusUtil::SetThreadOperation(ThreadStatus::OP_COMPACTION);
   ReportStartedCompaction(compaction);
 }
@@ -311,7 +311,7 @@ void CompactionJob::ReportStartedCompaction(
     Compaction* compaction) {
   const auto* cfd = compact_->compaction->column_family_data();
   ThreadStatusUtil::SetColumnFamily(cfd, cfd->ioptions()->env,
-                                    cfd->options()->enable_thread_tracking);
+                                    db_options_.enable_thread_tracking);
 
   ThreadStatusUtil::SetThreadOperationProperty(
       ThreadStatus::COMPACTION_JOB_ID,
@@ -539,7 +539,7 @@ Status CompactionJob::Run() {
     thread.join();
   }
 
-  if (output_directory_ && !db_options_.disableDataSync) {
+  if (output_directory_ && !db_options_.disable_data_sync) {
     output_directory_->Fsync();
   }
 
@@ -658,8 +658,11 @@ Status CompactionJob::Install(const MutableCFOptions& mutable_cf_options) {
 
 void CompactionJob::ProcessKeyValueCompaction(SubcompactionState* sub_compact) {
   assert(sub_compact != nullptr);
-  std::unique_ptr<InternalIterator> input(
-      versions_->MakeInputIterator(sub_compact->compaction));
+  ColumnFamilyData* cfd = sub_compact->compaction->column_family_data();
+  std::unique_ptr<RangeDelAggregator> range_del_agg(
+      new RangeDelAggregator(cfd->internal_comparator(), existing_snapshots_));
+  std::unique_ptr<InternalIterator> input(versions_->MakeInputIterator(
+      sub_compact->compaction, range_del_agg.get()));
 
   AutoThreadOperationStageUpdater stage_updater(
       ThreadStatus::STAGE_COMPACTION_PROCESS_KV);
@@ -680,7 +683,6 @@ void CompactionJob::ProcessKeyValueCompaction(SubcompactionState* sub_compact) {
     prev_prepare_write_nanos = IOSTATS(prepare_write_nanos);
   }
 
-  ColumnFamilyData* cfd = sub_compact->compaction->column_family_data();
   const MutableCFOptions* mutable_cf_options =
       sub_compact->compaction->mutable_cf_options();
 
@@ -737,7 +739,7 @@ void CompactionJob::ProcessKeyValueCompaction(SubcompactionState* sub_compact) {
   sub_compact->c_iter.reset(new CompactionIterator(
       input.get(), cfd->user_comparator(), &merge, versions_->LastSequence(),
       &existing_snapshots_, earliest_write_conflict_snapshot_, env_, false,
-      sub_compact->compaction, compaction_filter));
+      range_del_agg.get(), sub_compact->compaction, compaction_filter));
   auto c_iter = sub_compact->c_iter.get();
   c_iter->SeekToFirst();
   const auto& c_iter_stats = c_iter->iter_stats();
@@ -762,10 +764,12 @@ void CompactionJob::ProcessKeyValueCompaction(SubcompactionState* sub_compact) {
     if (end != nullptr &&
         cfd->user_comparator()->Compare(c_iter->user_key(), *end) >= 0) {
       break;
-    } else if (sub_compact->ShouldStopBefore(
+    } else if (sub_compact->compaction->output_level() != 0 &&
+               sub_compact->ShouldStopBefore(
                    key, sub_compact->current_output_file_size) &&
                sub_compact->builder != nullptr) {
-      status = FinishCompactionOutputFile(input->status(), sub_compact);
+      status = FinishCompactionOutputFile(input->status(), sub_compact,
+                                          range_del_agg.get());
       if (!status.ok()) {
         break;
       }
@@ -842,21 +846,29 @@ void CompactionJob::ProcessKeyValueCompaction(SubcompactionState* sub_compact) {
       }
     }
 
+    Status input_status = input->status();
+    c_iter->Next();
+
     // Close output file if it is big enough
     // TODO(aekmekji): determine if file should be closed earlier than this
     // during subcompactions (i.e. if output size, estimated by input size, is
     // going to be 1.2MB and max_output_file_size = 1MB, prefer to have 0.6MB
     // and 0.6MB instead of 1MB and 0.2MB)
-    if (sub_compact->current_output_file_size >=
-        sub_compact->compaction->max_output_file_size()) {
-      status = FinishCompactionOutputFile(input->status(), sub_compact);
+    if (sub_compact->compaction->output_level() != 0 &&
+        sub_compact->current_output_file_size >=
+            sub_compact->compaction->max_output_file_size()) {
+      const Slice* next_key = nullptr;
+      if (c_iter->Valid()) {
+        next_key = &c_iter->key();
+      }
+      status = FinishCompactionOutputFile(input_status, sub_compact,
+                                          range_del_agg.get(), next_key);
       if (sub_compact->outputs.size() == 1) {
         // Use dictionary from first output file for compression of subsequent
         // files.
         sub_compact->compression_dict = std::move(compression_dict);
       }
     }
-    c_iter->Next();
   }
 
   sub_compact->num_input_records = c_iter_stats.num_input_records;
@@ -883,8 +895,13 @@ void CompactionJob::ProcessKeyValueCompaction(SubcompactionState* sub_compact) {
     status = Status::ShutdownInProgress(
         "Database shutdown or Column family drop during compaction");
   }
+  if (status.ok() && sub_compact->builder == nullptr &&
+      range_del_agg->ShouldAddTombstones(bottommost_level_)) {
+    status = OpenCompactionOutputFile(sub_compact);
+  }
   if (status.ok() && sub_compact->builder != nullptr) {
-    status = FinishCompactionOutputFile(input->status(), sub_compact);
+    status = FinishCompactionOutputFile(input->status(), sub_compact,
+                                        range_del_agg.get());
   }
   if (status.ok()) {
     status = input->status();
@@ -935,7 +952,9 @@ void CompactionJob::RecordDroppedKeys(
 }
 
 Status CompactionJob::FinishCompactionOutputFile(
-    const Status& input_status, SubcompactionState* sub_compact) {
+    const Status& input_status, SubcompactionState* sub_compact,
+    RangeDelAggregator* range_del_agg,
+    const Slice* next_table_min_key /* = nullptr */) {
   AutoThreadOperationStageUpdater stage_updater(
       ThreadStatus::STAGE_COMPACTION_SYNC_FILE);
   assert(sub_compact != nullptr);
@@ -950,6 +969,16 @@ Status CompactionJob::FinishCompactionOutputFile(
   // Check for iterator errors
   Status s = input_status;
   auto meta = &sub_compact->current_output()->meta;
+  if (s.ok()) {
+    // For the first output table, include range tombstones before the min key
+    // boundary. For subsequent output tables, this is unnecessary because we
+    // extend each file's max key boundary up until the next file's min key when
+    // range tombstones fall in the gap.
+    range_del_agg->AddToBuilder(
+        sub_compact->builder.get(),
+        sub_compact->outputs.size() == 1 /* extend_before_min_key */,
+        next_table_min_key, meta, bottommost_level_);
+  }
   const uint64_t current_entries = sub_compact->builder->NumEntries();
   meta->marked_for_compaction = sub_compact->builder->NeedCompact();
   if (s.ok()) {
@@ -963,7 +992,7 @@ Status CompactionJob::FinishCompactionOutputFile(
   sub_compact->total_bytes += current_bytes;
 
   // Finish and check for file errors
-  if (s.ok() && !db_options_.disableDataSync) {
+  if (s.ok() && !db_options_.disable_data_sync) {
     StopWatch sw(env_, stats_, COMPACTION_OUTFILE_SYNC_MICROS);
     s = sub_compact->outfile->Sync(db_options_.use_fsync);
   }
@@ -1136,7 +1165,9 @@ Status CompactionJob::OpenCompactionOutputFile(
       *cfd->ioptions(), cfd->internal_comparator(),
       cfd->int_tbl_prop_collector_factories(), cfd->GetID(), cfd->GetName(),
       sub_compact->outfile.get(), sub_compact->compaction->output_compression(),
-      cfd->ioptions()->compression_opts, &sub_compact->compression_dict,
+      cfd->ioptions()->compression_opts,
+      sub_compact->compaction->output_level(),
+      &sub_compact->compression_dict,
       skip_filters));
   LogFlush(db_options_.info_log);
   return s;

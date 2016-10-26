@@ -63,7 +63,13 @@ enum CompressionType : unsigned char {
   kLZ4Compression = 0x4,
   kLZ4HCCompression = 0x5,
   kXpressCompression = 0x6,
-  // zstd format is not finalized yet so it's subject to changes.
+  kZSTD = 0x7,
+
+  // Only use kZSTDNotFinalCompression if you have to use ZSTD lib older than
+  // 0.8.0 or consider a possibility of downgrading the service or copying
+  // the database files to another service running with an older version of
+  // RocksDB that doesn't have kZSTD. Otherwise, you should use kZSTD. We will
+  // eventually remove the option from the public API.
   kZSTDNotFinalCompression = 0x40,
 
   // kDisableCompressionOption is used to disable some compression options.
@@ -790,6 +796,12 @@ struct ColumnFamilyOptions {
   // Default: false
   bool paranoid_file_checks;
 
+  // In debug mode, RocksDB run consistency checks on the LSM everytime the LSM
+  // change (Flush, Compaction, AddFile). These checks are disabled in release
+  // mode, use this option to enable them in release mode as well.
+  // Default: false
+  bool force_consistency_checks;
+
   // Measure IO stats in compactions and flushes, if true.
   // Default: false
   bool report_bg_io_stats;
@@ -907,7 +919,7 @@ struct DBOptions {
   // to stable storage. Their contents remain in the OS buffers till the
   // OS decides to flush them. This option is good for bulk-loading
   // of data. Once the bulk-loading is complete, please issue a
-  // sync to the OS to flush all dirty buffesrs to stable storage.
+  // sync to the OS to flush all dirty buffers to stable storage.
   // Default: false
   bool disableDataSync;
 
@@ -1412,7 +1424,7 @@ struct ReadOptions {
 
   // If "snapshot" is non-nullptr, read as of the supplied snapshot
   // (which must belong to the DB that is being read and which must
-  // not have been released).  If "snapshot" is nullptr, use an impliicit
+  // not have been released).  If "snapshot" is nullptr, use an implicit
   // snapshot of the state at the beginning of this read operation.
   // Default: nullptr
   const Snapshot* snapshot;
@@ -1603,6 +1615,21 @@ struct CompactRangeOptions {
   // if there is a compaction filter
   BottommostLevelCompaction bottommost_level_compaction =
       BottommostLevelCompaction::kIfHaveCompactionFilter;
+};
+
+// IngestExternalFileOptions is used by IngestExternalFile()
+struct IngestExternalFileOptions {
+  // Can be set to true to move the files instead of copying them.
+  bool move_files = false;
+  // If set to false, an ingested file keys could appear in existing snapshots
+  // that where created before the file was ingested.
+  bool snapshot_consistency = true;
+  // If set to false, IngestExternalFile() will fail if the file key range
+  // overlaps with existing keys or tombstones in the DB.
+  bool allow_global_seqno = true;
+  // If set to false and the file key range overlaps with the memtable key range
+  // (memtable flush required), IngestExternalFile will fail.
+  bool allow_blocking_flush = true;
 };
 
 }  // namespace rocksdb

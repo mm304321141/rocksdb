@@ -95,7 +95,7 @@ TEST_F(BlockTest, SimpleTest) {
   BlockContents contents;
   contents.data = rawblock;
   contents.cachable = false;
-  Block reader(std::move(contents));
+  Block reader(std::move(contents), kDisableGlobalSequenceNumber);
 
   // read contents of block sequentially
   int count = 0;
@@ -156,8 +156,8 @@ void CheckBlockContents(BlockContents contents, const int max_key,
   // create block reader
   BlockContents contents_ref(contents.data, contents.cachable,
                              contents.compression_type);
-  Block reader1(std::move(contents));
-  Block reader2(std::move(contents_ref));
+  Block reader1(std::move(contents), kDisableGlobalSequenceNumber);
+  Block reader2(std::move(contents_ref), kDisableGlobalSequenceNumber);
 
   std::unique_ptr<const SliceTransform> prefix_extractor(
       NewFixedPrefixTransform(prefix_size));
@@ -232,7 +232,8 @@ class BlockReadAmpBitmapSlowAndAccurate {
 
   // Return true if any byte in this range was Marked
   bool IsAnyInRangeMarked(size_t start_offset, size_t end_offset) {
-    auto it = marked_ranges_.lower_bound(std::make_pair(start_offset, 0));
+    auto it = marked_ranges_.lower_bound(
+        std::make_pair(start_offset, static_cast<size_t>(0)));
     if (it == marked_ranges_.end()) {
       return false;
     }
@@ -292,7 +293,7 @@ TEST_F(BlockTest, BlockReadAmpBitmap) {
     random_entry_offsets.resize(
         std::distance(random_entry_offsets.begin(), it));
 
-    std::vector<std::pair<uint32_t, uint32_t>> random_entries;
+    std::vector<std::pair<size_t, size_t>> random_entries;
     for (size_t i = 0; i < random_entry_offsets.size(); i++) {
       size_t entry_start = random_entry_offsets[i];
       size_t entry_end;
@@ -307,7 +308,8 @@ TEST_F(BlockTest, BlockReadAmpBitmap) {
     for (size_t i = 0; i < random_entries.size(); i++) {
       auto &current_entry = random_entries[rnd.Next() % random_entries.size()];
 
-      read_amp_bitmap.Mark(current_entry.first, current_entry.second);
+      read_amp_bitmap.Mark(static_cast<uint32_t>(current_entry.first),
+                           static_cast<uint32_t>(current_entry.second));
       read_amp_slow_and_accurate.Mark(current_entry.first,
                                       current_entry.second);
 
@@ -356,7 +358,8 @@ TEST_F(BlockTest, BlockWithReadAmpBitmap) {
     BlockContents contents;
     contents.data = rawblock;
     contents.cachable = true;
-    Block reader(std::move(contents), kBytesPerBit, stats.get());
+    Block reader(std::move(contents), kDisableGlobalSequenceNumber,
+                 kBytesPerBit, stats.get());
 
     // read contents of block sequentially
     size_t read_bytes = 0;
@@ -389,7 +392,8 @@ TEST_F(BlockTest, BlockWithReadAmpBitmap) {
     BlockContents contents;
     contents.data = rawblock;
     contents.cachable = true;
-    Block reader(std::move(contents), kBytesPerBit, stats.get());
+    Block reader(std::move(contents), kDisableGlobalSequenceNumber,
+                 kBytesPerBit, stats.get());
 
     size_t read_bytes = 0;
     BlockIter *iter = static_cast<BlockIter *>(
@@ -424,7 +428,8 @@ TEST_F(BlockTest, BlockWithReadAmpBitmap) {
     BlockContents contents;
     contents.data = rawblock;
     contents.cachable = true;
-    Block reader(std::move(contents), kBytesPerBit, stats.get());
+    Block reader(std::move(contents), kDisableGlobalSequenceNumber,
+                 kBytesPerBit, stats.get());
 
     size_t read_bytes = 0;
     BlockIter *iter = static_cast<BlockIter *>(

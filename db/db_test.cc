@@ -1193,7 +1193,7 @@ bool MinLevelToCompress(CompressionType& type, Options& options, int wbits,
     type = kXpressCompression;
     fprintf(stderr, "using xpress\n");
   } else if (ZSTD_Supported()) {
-    type = kZSTDNotFinalCompression;
+    type = kZSTD;
     fprintf(stderr, "using ZSTD\n");
   } else {
     fprintf(stderr, "skipping test, compression disabled\n");
@@ -1252,7 +1252,9 @@ TEST_F(DBTest, MinLevelToCompress2) {
   MinLevelHelper(this, options);
 }
 
-TEST_F(DBTest, RepeatedWritesToSameKey) {
+// This test may fail because of a legit case that multiple L0 files
+// are trivial moved to L1.
+TEST_F(DBTest, DISABLED_RepeatedWritesToSameKey) {
   do {
     Options options = CurrentOptions();
     options.env = env_;
@@ -2646,15 +2648,11 @@ class ModelDB : public DB {
   }
 
 #ifndef ROCKSDB_LITE
-  using DB::AddFile;
-  virtual Status AddFile(ColumnFamilyHandle* column_family,
-                         const std::vector<ExternalSstFileInfo>& file_info_list,
-                         bool move_file, bool skip_snapshot_check) override {
-    return Status::NotSupported("Not implemented.");
-  }
-  virtual Status AddFile(ColumnFamilyHandle* column_family,
-                         const std::vector<std::string>& file_path_list,
-                         bool move_file, bool skip_snapshot_check) override {
+  using DB::IngestExternalFile;
+  virtual Status IngestExternalFile(
+      ColumnFamilyHandle* column_family,
+      const std::vector<std::string>& external_files,
+      const IngestExternalFileOptions& options) override {
     return Status::NotSupported("Not implemented.");
   }
 
@@ -2762,6 +2760,12 @@ class ModelDB : public DB {
     return Status::NotSupported("Not supported operation.");
   }
 
+  virtual Status SetDBOptions(
+      const std::unordered_map<std::string, std::string>& new_options)
+      override {
+    return Status::NotSupported("Not supported operation.");
+  }
+
   using DB::CompactFiles;
   virtual Status CompactFiles(const CompactionOptions& compact_options,
                               ColumnFamilyHandle* column_family,
@@ -2806,13 +2810,12 @@ class ModelDB : public DB {
   virtual Env* GetEnv() const override { return nullptr; }
 
   using DB::GetOptions;
-  virtual const Options& GetOptions(
-      ColumnFamilyHandle* column_family) const override {
+  virtual Options GetOptions(ColumnFamilyHandle* column_family) const override {
     return options_;
   }
 
   using DB::GetDBOptions;
-  virtual const DBOptions& GetDBOptions() const override { return options_; }
+  virtual DBOptions GetDBOptions() const override { return options_; }
 
   using DB::Flush;
   virtual Status Flush(const rocksdb::FlushOptions& options,
@@ -2881,6 +2884,10 @@ class ModelDB : public DB {
     }
     virtual void Seek(const Slice& k) override {
       iter_ = map_->lower_bound(k.ToString());
+    }
+    virtual void SeekForPrev(const Slice& k) override {
+      iter_ = map_->upper_bound(k.ToString());
+      Prev();
     }
     virtual void Next() override { ++iter_; }
     virtual void Prev() override {
@@ -4708,7 +4715,7 @@ TEST_F(DBTest, CompressionStatsTest) {
     type = kXpressCompression;
     fprintf(stderr, "using xpress\n");
   } else if (ZSTD_Supported()) {
-    type = kZSTDNotFinalCompression;
+    type = kZSTD;
     fprintf(stderr, "using ZSTD\n");
   } else {
     fprintf(stderr, "skipping test, compression disabled\n");
