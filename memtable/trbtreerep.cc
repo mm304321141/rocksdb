@@ -285,6 +285,23 @@ namespace {
                 }
             }
 
+            // retreat to the first entry with a key <= target
+            virtual void SeekForPrev(const Slice& user_key, const char* memtable_key)
+            override
+            {
+                if(memtable_key != nullptr)
+                {
+                    ReadLock l(&lock_);
+                    where_ = tree_->rlwb_i(memtable_key);
+                }
+                else
+                {
+                    EncodeKey(&tmp_key_, user_key);
+                    ReadLock l(&lock_);
+                    where_ = tree_->rlwb_i(tmp_key_.c_str());
+                }
+            }
+
             // Position at the first entry in list.
             // Final state of iterator is Valid() iff list is not empty.
             virtual void SeekToFirst() override
@@ -355,6 +372,21 @@ namespace {
                 {
                     EncodeKey(&tmp_key_, user_key);
                     where_ = tree_->lwb_i(tmp_key_.c_str());
+                }
+            }
+
+            // retreat to the first entry with a key <= target
+            virtual void SeekForPrev(const Slice& user_key, const char* memtable_key)
+            override
+            {
+                if(memtable_key != nullptr)
+                {
+                    where_ = tree_->rlwb_i(memtable_key);
+                }
+                else
+                {
+                    EncodeKey(&tmp_key_, user_key);
+                    where_ = tree_->rlwb_i(tmp_key_.c_str());
                 }
             }
 
