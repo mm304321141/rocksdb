@@ -91,7 +91,7 @@ class DBImpl : public DB {
   using DB::Get;
   virtual Status Get(const ReadOptions& options,
                      ColumnFamilyHandle* column_family, const Slice& key,
-                     std::string* value) override;
+                     PinnableSlice* value) override;
   using DB::MultiGet;
   virtual std::vector<Status> MultiGet(
       const ReadOptions& options,
@@ -565,8 +565,10 @@ class DBImpl : public DB {
   void NotifyOnMemTableSealed(ColumnFamilyData* cfd,
                               const MemTableInfo& mem_table_info);
 
+#ifndef ROCKSDB_LITE
   void NotifyOnExternalFileIngested(
       ColumnFamilyData* cfd, const ExternalSstFileIngestionJob& ingestion_job);
+#endif  // !ROCKSDB_LITE
 
   void NewThreadStatusCfInfo(ColumnFamilyData* cfd) const;
 
@@ -817,7 +819,7 @@ class DBImpl : public DB {
   std::deque<LogWriterNumber> logs_;
   // Signaled when getting_synced becomes false for some of the logs_.
   InstrumentedCondVar log_sync_cv_;
-  uint64_t total_log_size_;
+  std::atomic<uint64_t> total_log_size_;
   // only used for dynamically adjusting max_total_wal_size. it is a sum of
   // [write_buffer_size * max_write_buffer_number] over all column families
   uint64_t max_total_in_memory_state_;
@@ -998,8 +1000,7 @@ class DBImpl : public DB {
   // A flag indicating whether the current rocksdb database has any
   // data that is not yet persisted into either WAL or SST file.
   // Used when disableWAL is true.
-  bool has_unpersisted_data_;
-
+  std::atomic<bool> has_unpersisted_data_;
 
   // if an attempt was made to flush all column families that
   // the oldest log depends on but uncommited data in the oldest
@@ -1103,7 +1104,7 @@ class DBImpl : public DB {
   // Function that Get and KeyMayExist call with no_io true or false
   // Note: 'value_found' from KeyMayExist propagates here
   Status GetImpl(const ReadOptions& options, ColumnFamilyHandle* column_family,
-                 const Slice& key, std::string* value,
+                 const Slice& key, PinnableSlice* value,
                  bool* value_found = nullptr);
 
   bool GetIntPropertyInternal(ColumnFamilyData* cfd,

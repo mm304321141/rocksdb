@@ -291,9 +291,8 @@ class DBIter: public Iterator {
 inline bool DBIter::ParseKey(ParsedInternalKey* ikey) {
   if (!ParseInternalKey(iter_->key(), ikey)) {
     status_ = Status::Corruption("corrupted internal key in DBIter");
-    Log(InfoLogLevel::ERROR_LEVEL,
-        logger_, "corrupted internal key in DBIter: %s",
-        iter_->key().ToString(true).c_str());
+    ROCKS_LOG_ERROR(logger_, "corrupted internal key in DBIter: %s",
+                    iter_->key().ToString(true).c_str());
     return false;
   } else {
     return true;
@@ -341,6 +340,7 @@ void DBIter::Next() {
 //
 // NOTE: In between, saved_key_ can point to a user key that has
 //       a delete marker or a sequence number higher than sequence_
+//       saved_key_ MUST have a proper user_key before calling this function
 //
 // The prefix_check parameter controls whether we check the iterated
 // keys against the prefix of the seeked key. Set to false when
@@ -508,8 +508,7 @@ void DBIter::FindNextUserEntryInternal(bool skipping, bool prefix_check) {
 //       iter_ points to the next entry (or invalid)
 void DBIter::MergeValuesNewToOld() {
   if (!merge_operator_) {
-    Log(InfoLogLevel::ERROR_LEVEL,
-        logger_, "Options::merge_operator is null.");
+    ROCKS_LOG_ERROR(logger_, "Options::merge_operator is null.");
     status_ = Status::InvalidArgument("merge_operator_ must be set.");
     valid_ = false;
     return;
@@ -946,7 +945,6 @@ void DBIter::Seek(const Slice& target) {
   StopWatch sw(env_, statistics_, DB_SEEK);
   ReleaseTempPinnedData();
   saved_key_.Clear();
-  // now saved_key is used to store internal key.
   saved_key_.SetInternalKey(target, sequence_);
 
   {
@@ -961,6 +959,9 @@ void DBIter::Seek(const Slice& target) {
     }
     direction_ = kForward;
     ClearSavedValue();
+    // convert the InternalKey to UserKey in saved_key_ before
+    // passed to FindNextUserEntry
+    saved_key_.Reserve(saved_key_.Size() - 8);
     FindNextUserEntry(false /* not skipping */, prefix_same_as_start_);
     if (!valid_) {
       prefix_start_key_.clear();
@@ -1039,6 +1040,8 @@ void DBIter::SeekToFirst() {
 
   RecordTick(statistics_, NUMBER_DB_SEEK);
   if (iter_->Valid()) {
+    saved_key_.SetKey(ExtractUserKey(iter_->key()),
+                      !iter_->IsKeyPinned() || !pin_thru_lifetime_ /* copy */);
     FindNextUserEntry(false /* not skipping */, false /* no prefix check */);
     if (statistics_ != nullptr) {
       if (valid_) {

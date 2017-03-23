@@ -24,8 +24,6 @@
 #include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <gflags/gflags.h>
-#include <table/terark_zip_table.h>
 #include <sys/types.h>
 #include <atomic>
 #include <condition_variable>
@@ -46,6 +44,7 @@
 #include "rocksdb/memtablerep.h"
 #include "rocksdb/options.h"
 #include "rocksdb/perf_context.h"
+#include "rocksdb/persistent_cache.h"
 #include "rocksdb/rate_limiter.h"
 #include "rocksdb/slice.h"
 #include "rocksdb/slice_transform.h"
@@ -69,14 +68,12 @@
 #include "util/xxhash.h"
 #include "utilities/blob_db/blob_db.h"
 #include "utilities/merge_operators.h"
+#include "utilities/persistent_cache/block_cache_tier.h"
 
 #ifdef OS_WIN
 #include <io.h>  // open/close
 #endif
 
-namespace {
-using namespace GFLAGS;
-using namespace fLS;
 using GFLAGS::ParseCommandLineFlags;
 using GFLAGS::RegisterFlagValidator;
 using GFLAGS::SetUsageMessage;
@@ -232,6 +229,8 @@ DEFINE_bool(reverse_iterator, false,
             "Seek and then Next");
 
 DEFINE_bool(use_uint64_comparator, false, "use Uint64 user comparator");
+
+DEFINE_bool(pin_slice, true, "use pinnable slice for point lookup");
 
 DEFINE_int64(batch_size, 1, "Batch size");
 
@@ -428,9 +427,6 @@ DEFINE_int32(random_access_max_buffer_size, 1024 * 1024,
 DEFINE_int32(writable_file_max_buffer_size, 1024 * 1024,
              "Maximum write buffer for Writable File");
 
-DEFINE_bool(skip_table_builder_flush, false, "Skip flushing block in "
-            "table builder ");
-
 DEFINE_int32(bloom_bits, -1, "Bloom filter bits per key. Negative means"
              " use default settings.");
 DEFINE_double(memtable_bloom_size_ratio, 0,
@@ -450,7 +446,19 @@ DEFINE_bool(show_table_properties, false,
 
 DEFINE_string(db, "", "Use the db with the following name.");
 
-DEFINE_string(terarktempdir, "/tmp", "Use the localtempdir with the following name.");
+// Read cache flags
+
+DEFINE_string(read_cache_path, "",
+              "If not empty string, a read cache will be used in this path");
+
+DEFINE_int64(read_cache_size, 4LL * 1024 * 1024 * 1024,
+             "Maximum size of the read cache");
+
+DEFINE_bool(read_cache_direct_write, true,
+            "Whether to use Direct IO for writing to the read cache");
+
+DEFINE_bool(read_cache_direct_read, true,
+            "Whether to use Direct IO for reading from read cache");
 
 static bool ValidateCacheNumshardbits(const char* flagname, int32_t value) {
   if (value >= 20) {
@@ -473,9 +481,6 @@ DEFINE_int64(writes, -1, "Number of write operations to do. If negative, do"
 
 DEFINE_bool(sync, false, "Sync all writes to disk");
 
-DEFINE_bool(disable_data_sync, false, "If true, do not wait until data is"
-            " synced to disk.");
-
 DEFINE_bool(use_fsync, false, "If true, issue fsync instead of fdatasync");
 
 DEFINE_bool(disable_wal, false, "If true, do not write WAL for write.");
@@ -484,12 +489,16 @@ DEFINE_string(wal_dir, "", "If not empty, use the given dir for WAL");
 
 DEFINE_int32(num_levels, 7, "The total number of levels");
 
-DEFINE_int64(target_file_size_base, 2 * 1048576, "Target file size at level-1");
+DEFINE_int64(target_file_size_base, rocksdb::Options().target_file_size_base,
+             "Target file size at level-1");
 
-DEFINE_int32(target_file_size_multiplier, 1,
+DEFINE_int32(target_file_size_multiplier,
+             rocksdb::Options().target_file_size_multiplier,
              "A multiplier to compute target level-N file size (N >= 2)");
 
-DEFINE_uint64(max_bytes_for_level_base,  10 * 1048576, "Max bytes for level-1");
+DEFINE_uint64(max_bytes_for_level_base,
+              rocksdb::Options().max_bytes_for_level_base,
+              "Max bytes for level-1");
 
 DEFINE_bool(level_compaction_dynamic_level_bytes, false,
             "Whether level size base is dynamic");
@@ -875,8 +884,7 @@ enum RepFactory {
   kPrefixHash,
   kVectorRep,
   kHashLinkedList,
-  kCuckoo,
-  kThreadedRBTree,
+  kCuckoo
 };
 
 static enum RepFactory StringToRepFactory(const char* ctype) {
@@ -892,8 +900,6 @@ static enum RepFactory StringToRepFactory(const char* ctype) {
     return kHashLinkedList;
   else if (!strcasecmp(ctype, "cuckoo"))
     return kCuckoo;
-  else if (!strcasecmp(ctype, "trbtree"))
-    return kThreadedRBTree;
 
   fprintf(stdout, "Cannot parse memreptable %s\n", ctype);
   return kSkipList;
@@ -902,8 +908,6 @@ static enum RepFactory StringToRepFactory(const char* ctype) {
 static enum RepFactory FLAGS_rep_factory;
 DEFINE_string(memtablerep, "skip_list", "");
 DEFINE_int64(hash_bucket_count, 1024 * 1024, "hash bucket count");
-DEFINE_bool(use_terarkzip_table, true, "if use terarkzip table");
-
 DEFINE_bool(use_plain_table, false, "if use plain table "
             "instead of block-based table format");
 DEFINE_bool(use_cuckoo_table, false, "if use cuckoo table format");
@@ -1877,9 +1881,6 @@ class Benchmark {
       case kCuckoo:
         fprintf(stdout, "Memtablerep: cuckoo\n");
         break;
-      case kThreadedRBTree:
-        fprintf(stdout, "Memtablerep: threaded_rbtree\n");
-        break;
     }
     fprintf(stdout, "Perf Level: %d\n", FLAGS_perf_level);
 
@@ -2800,7 +2801,6 @@ class Benchmark {
     options.compaction_readahead_size = FLAGS_compaction_readahead_size;
     options.random_access_max_buffer_size = FLAGS_random_access_max_buffer_size;
     options.writable_file_max_buffer_size = FLAGS_writable_file_max_buffer_size;
-    options.disableDataSync = FLAGS_disable_data_sync;
     options.use_fsync = FLAGS_use_fsync;
     options.num_levels = FLAGS_num_levels;
     options.target_file_size_base = FLAGS_target_file_size_base;
@@ -2839,35 +2839,17 @@ class Benchmark {
         options.memtable_factory.reset(NewHashCuckooRepFactory(
             options.write_buffer_size, FLAGS_key_size + FLAGS_value_size));
         break;
-      case kThreadedRBTree:
-        options.memtable_factory.reset(NewThreadedRBTreeRepFactory(600000));
-        break;
 #else
       default:
         fprintf(stderr, "Only skip list is supported in lite mode\n");
         exit(1);
 #endif  // ROCKSDB_LITE
     }
-
-     if (FLAGS_use_terarkzip_table) {
-        std::cout << "use_terarkzip_table" << std::endl;
-        TerarkZipTableOptions opt;
-        opt.localTempDir = FLAGS_terarktempdir;
-
-        std::shared_ptr<TableFactory> block_based_factory(NewBlockBasedTableFactory());
-        //TableFactory* factory = NewTerarkZipTableFactory(opt, rocksdb::NewAdaptiveTableFactory(block_based_factory));
-        TableFactory* factory = NewTerarkZipTableFactory(opt, nullptr);
-        options.table_factory.reset(factory);
-     } else if (FLAGS_use_plain_table) {
-	std::cout << "use_plain_table" << std::endl;
+    if (FLAGS_use_plain_table) {
 #ifndef ROCKSDB_LITE
       if (FLAGS_rep_factory != kPrefixHash &&
           FLAGS_rep_factory != kHashLinkedList) {
         fprintf(stderr, "Waring: plain table is used with skipList\n");
-      }
-      if (!FLAGS_mmap_read && !FLAGS_mmap_write) {
-        fprintf(stderr, "plain table format requires mmap to operate\n");
-        exit(1);
       }
 
       int bloom_bits_per_key = FLAGS_bloom_bits;
@@ -2886,7 +2868,6 @@ class Benchmark {
       exit(1);
 #endif  // ROCKSDB_LITE
     } else if (FLAGS_use_cuckoo_table) {
-	std::cout << "cuckoo_table" << std::endl;
 #ifndef ROCKSDB_LITE
       if (FLAGS_cuckoo_hash_ratio > 1 || FLAGS_cuckoo_hash_ratio < 0) {
         fprintf(stderr, "Invalid cuckoo_hash_ratio\n");
@@ -2902,7 +2883,6 @@ class Benchmark {
       exit(1);
 #endif  // ROCKSDB_LITE
     } else {
-      std::cout << "block_based_table" << std::endl;
       BlockBasedTableOptions block_based_options;
       if (FLAGS_use_hash_search) {
         if (FLAGS_prefix_size == 0) {
@@ -2932,10 +2912,47 @@ class Benchmark {
       block_based_options.index_block_restart_interval =
           FLAGS_index_block_restart_interval;
       block_based_options.filter_policy = filter_policy_;
-      block_based_options.skip_table_builder_flush =
-          FLAGS_skip_table_builder_flush;
       block_based_options.format_version = 2;
       block_based_options.read_amp_bytes_per_bit = FLAGS_read_amp_bytes_per_bit;
+      if (FLAGS_read_cache_path != "") {
+#ifndef ROCKSDB_LITE
+        Status rc_status;
+
+        // Read cache need to be provided with a the Logger, we will put all
+        // reac cache logs in the read cache path in a file named rc_LOG
+        rc_status = FLAGS_env->CreateDirIfMissing(FLAGS_read_cache_path);
+        std::shared_ptr<Logger> read_cache_logger;
+        if (rc_status.ok()) {
+          rc_status = FLAGS_env->NewLogger(FLAGS_read_cache_path + "/rc_LOG",
+                                           &read_cache_logger);
+        }
+
+        if (rc_status.ok()) {
+          PersistentCacheConfig rc_cfg(FLAGS_env, FLAGS_read_cache_path,
+                                       FLAGS_read_cache_size,
+                                       read_cache_logger);
+
+          rc_cfg.enable_direct_reads = FLAGS_read_cache_direct_read;
+          rc_cfg.enable_direct_writes = FLAGS_read_cache_direct_write;
+          rc_cfg.writer_qdepth = 4;
+          rc_cfg.writer_dispatch_size = 4 * 1024;
+
+          auto pcache = std::make_shared<BlockCacheTier>(rc_cfg);
+          block_based_options.persistent_cache = pcache;
+          rc_status = pcache->Open();
+        }
+
+        if (!rc_status.ok()) {
+          fprintf(stderr, "Error initializing read cache, %s\n",
+                  rc_status.ToString().c_str());
+          exit(1);
+        }
+#else
+        fprintf(stderr, "Read cache is not supported in LITE\n");
+        exit(1);
+
+#endif
+      }
       options.table_factory.reset(
           NewBlockBasedTableFactory(block_based_options));
     }
@@ -3322,8 +3339,8 @@ class Benchmark {
 
       if (thread->shared->write_rate_limiter.get() != nullptr) {
         thread->shared->write_rate_limiter->Request(
-            entries_per_batch_ * (value_size_ + key_size_),
-            Env::IO_HIGH);
+            entries_per_batch_ * (value_size_ + key_size_), Env::IO_HIGH,
+            nullptr /* stats */);
         // Set time at which last op finished to Now() to hide latency and
         // sleep from rate limiter. Also, do the check once per batch, not
         // once per write.
@@ -3683,7 +3700,8 @@ class Benchmark {
 
       if (thread->shared->read_rate_limiter.get() != nullptr &&
           i % 1024 == 1023) {
-        thread->shared->read_rate_limiter->Request(1024, Env::IO_HIGH);
+        thread->shared->read_rate_limiter->Request(1024, Env::IO_HIGH,
+                                                   nullptr /* stats */);
       }
     }
 
@@ -3714,7 +3732,8 @@ class Benchmark {
       ++i;
       if (thread->shared->read_rate_limiter.get() != nullptr &&
           i % 1024 == 1023) {
-        thread->shared->read_rate_limiter->Request(1024, Env::IO_HIGH);
+        thread->shared->read_rate_limiter->Request(1024, Env::IO_HIGH,
+                                                   nullptr /* stats */);
       }
     }
     delete iter;
@@ -3755,7 +3774,8 @@ class Benchmark {
         }
       }
       if (thread->shared->read_rate_limiter.get() != nullptr) {
-        thread->shared->read_rate_limiter->Request(100, Env::IO_HIGH);
+        thread->shared->read_rate_limiter->Request(100, Env::IO_HIGH,
+                                                   nullptr /* stats */);
       }
 
       thread->stats.FinishedOps(nullptr, db, 100, kRead);
@@ -3802,6 +3822,7 @@ class Benchmark {
     std::unique_ptr<const char[]> key_guard;
     Slice key = AllocateKey(&key_guard);
     std::string value;
+    PinnableSlice pinnable_val;
 
     Duration duration(FLAGS_duration, reads_);
     while (!duration.Done(1)) {
@@ -3817,11 +3838,20 @@ class Benchmark {
         s = db_with_cfh->db->Get(options, db_with_cfh->GetCfh(key_rand), key,
                                  &value);
       } else {
-        s = db_with_cfh->db->Get(options, key, &value);
+        if (LIKELY(FLAGS_pin_slice == 1)) {
+          pinnable_val.Reset();
+          s = db_with_cfh->db->Get(options,
+                                   db_with_cfh->db->DefaultColumnFamily(), key,
+                                   &pinnable_val);
+        } else {
+          s = db_with_cfh->db->Get(
+              options, db_with_cfh->db->DefaultColumnFamily(), key, &value);
+        }
       }
       if (s.ok()) {
         found++;
-        bytes += key.size() + value.size();
+        bytes += key.size() +
+                 (FLAGS_pin_slice == 1 ? pinnable_val.size() : value.size());
       } else if (!s.IsNotFound()) {
         fprintf(stderr, "Get returned an error: %s\n", s.ToString().c_str());
         abort();
@@ -3829,7 +3859,8 @@ class Benchmark {
 
       if (thread->shared->read_rate_limiter.get() != nullptr &&
           read % 256 == 255) {
-        thread->shared->read_rate_limiter->Request(256, Env::IO_HIGH);
+        thread->shared->read_rate_limiter->Request(256, Env::IO_HIGH,
+                                                   nullptr /* stats */);
       }
 
       thread->stats.FinishedOps(db_with_cfh, db_with_cfh->db, 1, kRead);
@@ -3884,8 +3915,8 @@ class Benchmark {
       }
       if (thread->shared->read_rate_limiter.get() != nullptr &&
           num_multireads % 256 == 255) {
-        thread->shared->read_rate_limiter->Request(256 * entries_per_batch_,
-                                                   Env::IO_HIGH);
+        thread->shared->read_rate_limiter->Request(
+            256 * entries_per_batch_, Env::IO_HIGH, nullptr /* stats */);
       }
       thread->stats.FinishedOps(nullptr, db, entries_per_batch_, kRead);
     }
@@ -3982,7 +4013,8 @@ class Benchmark {
 
       if (thread->shared->read_rate_limiter.get() != nullptr &&
           read % 256 == 255) {
-        thread->shared->read_rate_limiter->Request(256, Env::IO_HIGH);
+        thread->shared->read_rate_limiter->Request(256, Env::IO_HIGH,
+                                                   nullptr /* stats */);
       }
 
       thread->stats.FinishedOps(&db_, db_.db, 1, kSeek);
@@ -4112,8 +4144,8 @@ class Benchmark {
 
       if (FLAGS_benchmark_write_rate_limit > 0) {
         write_rate_limiter->Request(
-            entries_per_batch_ * (value_size_ + key_size_),
-            Env::IO_HIGH);
+            entries_per_batch_ * (value_size_ + key_size_), Env::IO_HIGH,
+            nullptr /* stats */);
       }
     }
     thread->stats.AddBytes(bytes);
@@ -4784,7 +4816,8 @@ class Benchmark {
       found += key_found;
 
       if (thread->shared->read_rate_limiter.get() != nullptr) {
-        thread->shared->read_rate_limiter->Request(1, Env::IO_HIGH);
+        thread->shared->read_rate_limiter->Request(1, Env::IO_HIGH,
+                                                   nullptr /* stats */);
       }
     }
     delete iter;
@@ -4854,7 +4887,8 @@ class Benchmark {
 
       if (FLAGS_benchmark_write_rate_limit > 0) {
         write_rate_limiter->Request(
-            entries_per_batch_ * (value_size_ + key_size_), Env::IO_HIGH);
+            entries_per_batch_ * (value_size_ + key_size_), Env::IO_HIGH,
+            nullptr /* stats */);
       }
     }
   }

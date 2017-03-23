@@ -30,7 +30,6 @@ struct ImmutableDBOptions {
   int max_open_files;
   int max_file_opening_threads;
   std::shared_ptr<Statistics> statistics;
-  bool disable_data_sync;
   bool use_fsync;
   std::vector<DbPath> db_paths;
   std::string db_log_dir;
@@ -52,7 +51,6 @@ struct ImmutableDBOptions {
   bool use_direct_writes;
   bool allow_fallocate;
   bool is_fd_close_on_exec;
-  unsigned int stats_dump_period_sec;
   bool advise_random_on_open;
   size_t db_write_buffer_size;
   std::shared_ptr<WriteBufferManager> write_buffer_manager;
@@ -95,6 +93,7 @@ struct MutableDBOptions {
   uint64_t delayed_write_rate;
   uint64_t max_total_wal_size;
   uint64_t delete_obsolete_files_period_micros;
+  unsigned int stats_dump_period_sec;
 };
 
 }  // namespace rocksdb

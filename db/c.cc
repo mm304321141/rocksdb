@@ -1439,11 +1439,6 @@ void rocksdb_block_based_options_set_pin_l0_filter_and_index_blocks_in_cache(
   options->rep.pin_l0_filter_and_index_blocks_in_cache = v;
 }
 
-void rocksdb_block_based_options_set_skip_table_builder_flush(
-    rocksdb_block_based_table_options_t* options, unsigned char v) {
-  options->rep.skip_table_builder_flush = v;
-}
-
 void rocksdb_options_set_block_based_table_factory(
     rocksdb_options_t *opt,
     rocksdb_block_based_table_options_t* table_options) {
@@ -1713,11 +1708,6 @@ void rocksdb_options_set_prefix_extractor(
   opt->rep.prefix_extractor.reset(prefix_extractor);
 }
 
-void rocksdb_options_set_disable_data_sync(
-    rocksdb_options_t* opt, int disable_data_sync) {
-  opt->rep.disableDataSync = disable_data_sync;
-}
-
 void rocksdb_options_set_use_fsync(
     rocksdb_options_t* opt, int use_fsync) {
   opt->rep.use_fsync = use_fsync;
@@ -1827,11 +1817,6 @@ void rocksdb_options_set_allow_concurrent_memtable_write(rocksdb_options_t* opt,
 void rocksdb_options_set_enable_write_thread_adaptive_yield(
     rocksdb_options_t* opt, unsigned char v) {
   opt->rep.enable_write_thread_adaptive_yield = v;
-}
-
-void rocksdb_options_set_verify_checksums_in_compaction(
-    rocksdb_options_t* opt, unsigned char v) {
-  opt->rep.verify_checksums_in_compaction = v;
 }
 
 void rocksdb_options_set_max_sequential_skip_in_iterations(
@@ -1983,11 +1968,6 @@ void rocksdb_options_set_plain_table_factory(
 void rocksdb_options_set_max_successive_merges(
     rocksdb_options_t* opt, size_t v) {
   opt->rep.max_successive_merges = v;
-}
-
-void rocksdb_options_set_min_partial_merge_operands(
-    rocksdb_options_t* opt, uint32_t v) {
-  opt->rep.min_partial_merge_operands = v;
 }
 
 void rocksdb_options_set_bloom_locality(
@@ -2417,8 +2397,7 @@ void rocksdb_envoptions_destroy(rocksdb_envoptions_t* opt) { delete opt; }
 rocksdb_sstfilewriter_t* rocksdb_sstfilewriter_create(
     const rocksdb_envoptions_t* env, const rocksdb_options_t* io_options) {
   rocksdb_sstfilewriter_t* writer = new rocksdb_sstfilewriter_t;
-  writer->rep =
-      new SstFileWriter(env->rep, io_options->rep, io_options->rep.comparator);
+  writer->rep = new SstFileWriter(env->rep, io_options->rep);
   return writer;
 }
 
@@ -2426,8 +2405,7 @@ rocksdb_sstfilewriter_t* rocksdb_sstfilewriter_create_with_comparator(
     const rocksdb_envoptions_t* env, const rocksdb_options_t* io_options,
     const rocksdb_comparator_t* comparator) {
   rocksdb_sstfilewriter_t* writer = new rocksdb_sstfilewriter_t;
-  writer->rep =
-      new SstFileWriter(env->rep, io_options->rep, io_options->rep.comparator);
+  writer->rep = new SstFileWriter(env->rep, io_options->rep);
   return writer;
 }
 
