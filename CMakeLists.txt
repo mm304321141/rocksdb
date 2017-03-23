@@ -320,6 +320,7 @@ set(SOURCES
         memtable/hash_skiplist_rep.cc
         memtable/skiplistrep.cc
         memtable/vectorrep.cc
+        emtable/vectorrep.cc
         port/stack_trace.cc
         table/adaptive_table_factory.cc
         table/block.cc
