@@ -73,7 +73,7 @@ namespace {
             {
                 if(capacity > 0)
                 {
-                    memory_size_ptr -= capacity * sizeof(element_t);
+                    *memory_size_ptr -= capacity * sizeof(element_t);
                     std::free(node);
                     capacity = 0;
                     size = 0;
